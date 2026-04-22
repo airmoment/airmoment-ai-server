@@ -6,7 +6,4 @@ __pycache__/
 # 가상환경
 venv/
 
-# 모델 파일 (용량이 크면 제외, 필요시 주석처리)
-*.joblib
-
 .DS_Store
