@@ -60,9 +60,10 @@ def compute_future_min_by_group(group: pd.DataFrame, future_window_obs: int) -> 
     for i in range(len(group)):
         window_prices = prices[i + 1 : i + 1 + future_window_obs]
         if len(window_prices) > 0:
-            future_min[i] = np.min(window_prices)
+            valid = window_prices[~np.isnan(window_prices)]
+            if len(valid) > 0:
+                future_min[i] = np.min(valid)
     return pd.Series(future_min, index=group.index)
-
 
 def compute_recent_slope(values: np.ndarray) -> float:
     values = np.asarray(values, dtype=float)
