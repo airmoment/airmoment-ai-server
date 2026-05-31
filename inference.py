@@ -8,33 +8,40 @@ import pandas as pd
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-MODEL_PATH = PROJECT_ROOT / "xgb_regressor_best.joblib"
-
-# Prototype decision rule
-WAIT_THRESHOLD = 15000.0
+CLF_MODEL_PATH = PROJECT_ROOT / "catboost_classifier_best.joblib"
+REG_MODEL_PATH = PROJECT_ROOT / "xgb_regressor_best.joblib"
 
 
-def load_model(model_path: Path = MODEL_PATH):
+def load_model(
+    clf_path: Path = CLF_MODEL_PATH,
+    reg_path: Path = REG_MODEL_PATH,
+) -> Dict[str, Any]:
     """
-    Load the trained regression pipeline.
-    This joblib is expected to contain both preprocessing and model.
+    Load the trained classification (CatBoost) and regression (XGBoost) pipelines.
+
+    Returns:
+        {'clf': pipeline, 'reg': pipeline}
     """
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model file not found: {model_path}")
-    return joblib.load(model_path)
+    if not clf_path.exists():
+        raise FileNotFoundError(f"Classifier model not found: {clf_path}")
+    if not reg_path.exists():
+        raise FileNotFoundError(f"Regressor model not found: {reg_path}")
+
+    return {
+        'clf': joblib.load(clf_path),
+        'reg': joblib.load(reg_path),
+    }
 
 
 def predict_flight_decision(
     feature_row: Dict[str, Any],
-    model=None,
-    wait_threshold: float = WAIT_THRESHOLD,
+    model: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
     Run inference for a single feature row and return a map-like response.
 
-    Required:
-    - feature_row must contain the exact model input fields expected by the trained pipeline.
-    - feature_row must include current_cheapest_price so predicted_future_min_price can be calculated.
+    - BUY/WAIT decision : CatBoost classifier (predict_proba threshold 0.5)
+    - Drop amount       : XGBoost regressor (target_log_ratio → KRW via current price)
 
     Returns:
     {
@@ -51,15 +58,19 @@ def predict_flight_decision(
 
     input_df = pd.DataFrame([feature_row])
 
-    predicted_drop_amount = float(model.predict(input_df)[0])
+    # BUY/WAIT from classifier
+    wait_prob = float(model['clf'].predict_proba(input_df)[:, 1][0])
+    decision = "WAIT" if wait_prob >= 0.5 else "BUY"
 
-    if predicted_drop_amount < 0:
-        predicted_drop_amount = 0.0
-
+    # Drop amount from regressor (target_log_ratio)
+    log_ratio = float(model['reg'].predict(input_df)[0])
     current_price = float(feature_row["current_cheapest_price"])
-    predicted_future_min_price = current_price - predicted_drop_amount
 
-    decision = "WAIT" if predicted_drop_amount >= wait_threshold else "BUY"
+    # log_ratio = log(future_price / current_price)
+    # → future_price = current_price * exp(log_ratio)
+    import math
+    predicted_future_min_price = current_price * math.exp(log_ratio)
+    predicted_drop_amount = max(0.0, current_price - predicted_future_min_price)
 
     return {
         "decision": decision,
