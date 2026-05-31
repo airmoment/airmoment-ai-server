@@ -2,8 +2,30 @@
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 
 # 가상환경
 venv/
+.venv/
+env/
 
+# 학습 데이터 및 모델 바이너리
+data/
+data_*/
+*.joblib
+*.pkl
+*.h5
+
+# 출력 디렉토리
+outputs/
+*_outputs/
+*_outputs_*/
+
+# 환경변수
+.env
+.env.*
+
+# IDE
 .DS_Store
+.idea/
+.vscode/
