@@ -1,35 +1,24 @@
-import pandas as pd
 import joblib
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional, List
 
-from decision_rule import decide
+from inference import load_model, predict_flight_decision
 from predict import load_forecaster
 
 app = FastAPI()
 
-# ─────────────────────────────────────────────
-# 1) 기존 XGBoost 모델 (Buy / Wait 판단)
-# ─────────────────────────────────────────────
-model = joblib.load("xgb_regressor_best_0421.joblib")
+# 서버 시작 시 모델 1회 로드
+_xgb_model  = load_model()
+_forecaster = load_forecaster("airmoment_forecast.joblib")
 
-FEATURE_COLUMNS = [
-    "route_id", "departure_airport_code", "arrival_airport_code", "outbound_date",
-    "searched_day_of_week", "days_to_departure",
-    "is_weekend_search", "is_long_haul", "offer_count", "nonstop_ratio",
-    "cheapest_nonstop_price", "cheapest_offer_has_layover", "current_cheapest_price",
-    "curr_gap_to_typical_min", "curr_gap_to_typical_max",
-    "hist_recent_std", "hist_recent_slope", "curr_vs_hist_mean",
-    "price_change_1", "rolling_std_3", "price_vs_rolling_mean_3",
-]
 
+# ---------------------------------------------------------------------------
+# /predict  —  buy/wait 판단 (XGBoost)
+# ---------------------------------------------------------------------------
 
 class FlightFeatureRequest(BaseModel):
     route_id: str
-    departure_airport_code: str
-    arrival_airport_code: str
-    outbound_date: str
     searched_day_of_week: str
     days_to_departure: int
     is_weekend_search: bool
@@ -51,17 +40,24 @@ class FlightFeatureRequest(BaseModel):
 
 @app.post("/predict")
 def predict(request: FlightFeatureRequest):
-    df = pd.DataFrame([request.model_dump()], columns=FEATURE_COLUMNS)
-    predicted_drop = float(model.predict(df)[0])
-    decision = decide(predicted_drop)
-    return {"predictedDrop": predicted_drop, "decision": decision}
+    """
+    항공권 buy/wait 판단.
+
+    Response:
+        decision               : "BUY" | "WAIT"
+        predicted_drop_amount  : 예측 가격 하락폭 (₩)
+        predicted_future_min_price : 예측 미래 최저가 (₩)
+    """
+    result = predict_flight_decision(
+        feature_row=request.model_dump(),
+        model=_xgb_model,
+    )
+    return result
 
 
-# ─────────────────────────────────────────────
-# 2) ConformalForecaster (다구간 가격 예측)
-# ─────────────────────────────────────────────
-forecaster = load_forecaster("airmoment_forecast.joblib")
-
+# ---------------------------------------------------------------------------
+# /forecastPrice  —  다구간 가격 추이 예측 (Conformal)
+# ---------------------------------------------------------------------------
 
 class ForecastRequest(BaseModel):
     # 필수
@@ -71,9 +67,9 @@ class ForecastRequest(BaseModel):
     # 항공편 기본 정보
     days_to_departure: Optional[int] = None
     outbound_month: Optional[int] = Field(default=None, ge=1, le=12)
-    searched_day_of_week: Optional[str] = None       # "MON" ~ "SUN"
+    searched_day_of_week: Optional[str] = None
     outbound_day_of_week: Optional[str] = None
-    is_weekend_search: Optional[int] = None          # 0/1
+    is_weekend_search: Optional[int] = None
     is_peak_season: Optional[int] = None
     is_holiday_near: Optional[int] = None
     is_long_haul: Optional[int] = None
@@ -83,7 +79,7 @@ class ForecastRequest(BaseModel):
     cheapest_offer_has_layover: Optional[int] = None
 
     # 가격 수준
-    price_level: Optional[str] = None                # "low" / "typical" / "high"
+    price_level: Optional[str] = None
 
     # 히스토리 기반
     curr_gap_to_typical_min: Optional[int] = None
@@ -116,7 +112,15 @@ class ForecastResponse(BaseModel):
 
 @app.post("/forecastPrice", response_model=ForecastResponse)
 def forecast_price(request: ForecastRequest):
+    """
+    다구간 항공권 가격 추이 예측 (Split Conformal).
+
+    Response:
+        current_price : 현재 최저가 (₩)
+        x             : 시간축 [0, 1, 3, 7, 14] (일)
+        q10~q90       : 각 시점별 예측 구간 (길이 5 배열, ₩ 정수)
+    """
     try:
-        return forecaster.forecast(request.model_dump())
+        return _forecaster.forecast(request.model_dump())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"forecast failed: {e}")
