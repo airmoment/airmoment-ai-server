@@ -22,7 +22,8 @@ from sklearn.metrics import (
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
-from xgboost import XGBClassifier, XGBRegressor
+from catboost import CatBoostClassifier
+from xgboost import XGBRegressor
 
 import re
 
@@ -125,21 +126,14 @@ def make_preprocessor(df: pd.DataFrame, feature_cols: List[str]) -> ColumnTransf
 
 def make_classification_pipeline(df: pd.DataFrame, feature_cols: List[str], scale_pos_weight: float) -> Pipeline:
     preprocessor = make_preprocessor(df, feature_cols)
-    clf = XGBClassifier(
-        n_estimators=120,
-        max_depth=3,
+    clf = CatBoostClassifier(
+        iterations=120,
+        depth=4,
         learning_rate=0.05,
-        subsample=0.9,
-        colsample_bytree=0.9,
-        reg_alpha=0.5,
-        reg_lambda=2.0,
-        min_child_weight=2,
-        objective='binary:logistic',
-        eval_metric='logloss',
-        tree_method='hist',
-        n_jobs=1,
-        random_state=RANDOM_STATE,
-        scale_pos_weight=scale_pos_weight,
+        l2_leaf_reg=3.0,
+        random_seed=RANDOM_STATE,
+        verbose=0,
+        allow_writing_files=False,
     )
     return Pipeline([('preprocessor', preprocessor), ('model', clf)])
 
@@ -226,7 +220,10 @@ def main() -> None:
     last_clf_pipe = None
     last_reg_pipe = None
 
-    # 추가: best regression model 추적
+    # best classification / regression model 추적
+    best_clf_pipe = None
+    best_clf_f1 = -1.0
+    best_clf_fold = None
     best_reg_pipe = None
     best_reg_mae = float('inf')
     best_reg_fold = None
@@ -260,6 +257,12 @@ def main() -> None:
 
                 base_prob = np.full(len(y_test_cls), CLASS_BASELINE_PROB)
                 base_pred = (base_prob >= 0.5).astype(int)
+
+                fold_f1 = float(f1_score(y_test_cls, y_pred, zero_division=0))
+                if fold_f1 > best_clf_f1:
+                    best_clf_f1 = fold_f1
+                    best_clf_pipe = clf_pipe
+                    best_clf_fold = fold_no
 
                 fold_metrics_cls.append({
                     'fold': fold_no,
@@ -401,6 +404,8 @@ def main() -> None:
         'mean_baseline_accuracy': mean_or_none(cls_metrics_df.get('baseline_accuracy', pd.Series(dtype=float))),
         'mean_baseline_log_loss': mean_or_none(cls_metrics_df.get('baseline_log_loss', pd.Series(dtype=float))),
         'mean_baseline_brier': mean_or_none(cls_metrics_df.get('baseline_brier', pd.Series(dtype=float))),
+        'best_clf_fold': best_clf_fold,
+        'best_clf_f1': None if best_clf_f1 < 0 else best_clf_f1,
     }
 
     regression_summary = {
@@ -438,11 +443,11 @@ def main() -> None:
         }, f, ensure_ascii=False, indent=2)
 
     if last_clf_pipe is not None:
-        joblib.dump(last_clf_pipe, OUTPUT_DIR / 'xgb_classifier_last_fold.joblib')
+        joblib.dump(last_clf_pipe, OUTPUT_DIR / 'catboost_classifier_last_fold.joblib')
+    if best_clf_pipe is not None:
+        joblib.dump(best_clf_pipe, OUTPUT_DIR / f'catboost_classifier_best_{date_suffix}.joblib')
     if last_reg_pipe is not None:
         joblib.dump(last_reg_pipe, OUTPUT_DIR / 'xgb_regressor_last_fold.joblib')
-
-    # 추가: best regression model 저장
     if best_reg_pipe is not None:
         joblib.dump(best_reg_pipe, OUTPUT_DIR / f'xgb_regressor_best_{date_suffix}.joblib')
 
