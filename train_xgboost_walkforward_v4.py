@@ -22,11 +22,11 @@ from sklearn.metrics import (
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
-from catboost import CatBoostClassifier
 from xgboost import XGBRegressor
 
 import re
 from augment import jitter, window_slice
+from inference import NativeCatBoostClassifier
 
 AUG_RNG = np.random.default_rng(42)
 
@@ -122,59 +122,6 @@ def make_preprocessor(df: pd.DataFrame, feature_cols: List[str]) -> ColumnTransf
         ],
         remainder='drop',
     )
-
-
-class NativeCatBoostClassifier:
-    """CatBoost 네이티브 범주형 처리 래퍼.
-    수치형은 median impute, 범주형은 문자열 그대로 CatBoost에 전달.
-    sklearn Pipeline 없이 fit/predict_proba 인터페이스 제공.
-    """
-    def __init__(self, cat_cols: List[str], **catboost_params):
-        self.cat_cols = cat_cols
-        self.catboost_params = catboost_params
-        self.num_imputer_ = None
-        self.model_ = None
-        self.num_cols_: List[str] = []
-        self.feat_cols_: List[str] = []
-
-    def _prepare(self, X: pd.DataFrame, fit: bool = False) -> pd.DataFrame:
-        num_cols = [c for c in X.columns if c not in self.cat_cols]
-        if fit:
-            self.num_cols_ = num_cols
-            self.num_imputer_ = SimpleImputer(strategy='median').fit(X[num_cols])
-        # 인덱스 불일치 방지: 양쪽 모두 0-based reset
-        num_part = pd.DataFrame(
-            self.num_imputer_.transform(X[self.num_cols_]),
-            columns=self.num_cols_,
-        ).reset_index(drop=True)
-        cat_part = (
-            X[[c for c in self.cat_cols if c in X.columns]]
-            .fillna('__missing__')
-            .astype(str)
-            .reset_index(drop=True)
-        )
-        out = pd.concat([num_part, cat_part], axis=1)
-        if fit:
-            self.feat_cols_ = out.columns.tolist()
-        return out
-
-    def fit(self, X: pd.DataFrame, y: np.ndarray):
-        X_prep = self._prepare(X, fit=True)
-        cat_indices = [X_prep.columns.tolist().index(c)
-                       for c in self.cat_cols if c in X_prep.columns]
-        self.model_ = CatBoostClassifier(cat_features=cat_indices, **self.catboost_params)
-        self.model_.fit(X_prep, y)
-        return self
-
-    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        return self.model_.predict_proba(self._prepare(X))
-
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
-        return self.model_.predict(self._prepare(X))
-
-    @property
-    def feature_importances_(self) -> np.ndarray:
-        return self.model_.get_feature_importance()
 
 
 def make_classification_pipeline(df: pd.DataFrame, feature_cols: List[str], scale_pos_weight: float):
