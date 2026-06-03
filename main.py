@@ -18,11 +18,20 @@ _forecaster = load_forecaster("airmoment_forecast.joblib")
 # ---------------------------------------------------------------------------
 
 class FlightFeatureRequest(BaseModel):
+    # 노선 / 검색 기본 정보
     route_id: str
     searched_day_of_week: str
     days_to_departure: int
     is_weekend_search: bool
     is_long_haul: bool
+
+    # 출발편 정보 (outbound_date로부터 생성)
+    outbound_month: int = Field(ge=1, le=12)
+    outbound_day_of_week: str
+    is_peak_season: bool
+    is_holiday_near: bool
+
+    # 실시간 검색 결과
     offer_count: int
     nonstop_ratio: float
     cheapest_nonstop_price: Optional[int] = None
@@ -30,6 +39,8 @@ class FlightFeatureRequest(BaseModel):
     current_cheapest_price: int
     curr_gap_to_typical_min: Optional[int] = None
     curr_gap_to_typical_max: Optional[int] = None
+
+    # 과거 관측값 기반
     hist_recent_std: Optional[float] = None
     hist_recent_slope: Optional[float] = None
     curr_vs_hist_mean: Optional[float] = None
