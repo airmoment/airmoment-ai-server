@@ -39,9 +39,9 @@ import lightgbm as lgb
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DATA_FILE    = PROJECT_ROOT / 'data_0526' / 'processed' / 'quantile_dataset_v2.csv'
-MODEL_DIR    = PROJECT_ROOT / 'data_0526' / 'models'
-OUTPUT_DIR   = PROJECT_ROOT / 'data_0526' / 'outputs'
+DATA_FILE    = PROJECT_ROOT / 'data_0603' / 'processed' / 'quantile_dataset_v2.csv'
+MODEL_DIR    = PROJECT_ROOT / 'data_0603' / 'models'
+OUTPUT_DIR   = PROJECT_ROOT / 'data_0603' / 'outputs'
 
 HORIZONS = [1, 3, 7, 14]
 
