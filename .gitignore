@@ -16,6 +16,11 @@ data_*/
 *.pkl
 *.h5
 
+# 서버 실행용 모델 파일은 추적 유지
+!catboost_classifier_best.joblib
+!xgb_regressor_best.joblib
+!airmoment_forecast.joblib
+
 # 출력 디렉토리
 outputs/
 *_outputs/
