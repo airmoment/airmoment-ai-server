@@ -153,6 +153,12 @@ def predict_flight_decision(
     predicted_drop_amount = max(0.0, current_price * drop_ratio_pred)
     predicted_future_min_price = current_price - predicted_drop_amount
 
+    # Override: 분류기가 WAIT이더라도 예측 절감액이 3% 미만이면 BUY
+    # target_wait 레이블 정의(≥3% 하락)와 일치
+    MIN_WAIT_RATIO = 0.03
+    if decision == "WAIT" and (predicted_drop_amount / current_price) < MIN_WAIT_RATIO:
+        decision = "BUY"
+
     return {
         "decision": decision,
         "predicted_drop_amount": predicted_drop_amount,
