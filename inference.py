@@ -146,10 +146,12 @@ def predict_flight_decision(
     log_ratio = float(model['reg'].predict(input_df)[0])
     current_price = float(feature_row["current_cheapest_price"])
 
-    # log_ratio = log(future_price / current_price)
-    # → future_price = current_price * exp(log_ratio)
-    predicted_future_min_price = current_price * math.exp(log_ratio)
-    predicted_drop_amount = max(0.0, current_price - predicted_future_min_price)
+    # target_log_ratio = log1p(drop_ratio)  where drop_ratio = (current - future_min) / current
+    # → drop_ratio = expm1(log_ratio) = exp(log_ratio) - 1
+    # → future_min  = current * (1 - drop_ratio)
+    drop_ratio_pred = math.expm1(log_ratio)
+    predicted_drop_amount = max(0.0, current_price * drop_ratio_pred)
+    predicted_future_min_price = current_price - predicted_drop_amount
 
     return {
         "decision": decision,
