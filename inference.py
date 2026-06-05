@@ -101,15 +101,33 @@ def load_model(
     }
 
 
+def _horizon_index(days_to_departure: int) -> int:
+    """days_to_departure 기준으로 conformal forecast horizon 인덱스 반환.
+    forecast['q10'] = [현재, +1d, +3d, +7d, +14d] → 인덱스 0~4
+    """
+    if days_to_departure > 30:
+        return 4   # +14d
+    elif days_to_departure > 14:
+        return 3   # +7d
+    elif days_to_departure > 7:
+        return 2   # +3d
+    else:
+        return 1   # +1d
+
+
 def predict_flight_decision(
     feature_row: Dict[str, Any],
     model: Dict[str, Any] | None = None,
+    forecaster: Any | None = None,
 ) -> Dict[str, Any]:
     """
     Run inference for a single feature row and return a map-like response.
 
-    - BUY/WAIT decision : CatBoost classifier (predict_proba threshold 0.5)
-    - Drop amount       : XGBoost regressor (target_log_ratio → KRW via current price)
+    - BUY/WAIT decision       : CatBoost classifier
+    - predicted_drop_amount   : conformal q10/q90 기반
+        WAIT → current - q10[horizon]  (기다리면 최대 이만큼 아낄 수 있음)
+        BUY  → q90[horizon] - current  (지금 안 사면 최대 이만큼 더 낼 수 있음)
+    - predicted_future_price  : WAIT → q10, BUY → q50
 
     Returns:
     {
@@ -124,15 +142,17 @@ def predict_flight_decision(
     if "current_cheapest_price" not in feature_row:
         raise ValueError("feature_row must include 'current_cheapest_price'")
 
+    current_price = float(feature_row["current_cheapest_price"])
+    days = int(feature_row.get("days_to_departure", 999))
     input_df = pd.DataFrame([feature_row])
 
-    # 학습 시 사용한 컬럼 중 누락된 것은 NaN으로 채움 (optional 피처 처리)
+    # 학습 시 사용한 컬럼 중 누락된 것은 NaN으로 채움
     clf = model['clf']
     reg = model['reg']
     reg_preprocessor = reg.named_steps['preprocessor']
     reg_expected = (
-        list(reg_preprocessor.transformers[0][2]) +  # numeric cols
-        list(reg_preprocessor.transformers[1][2])    # categorical cols
+        list(reg_preprocessor.transformers[0][2]) +
+        list(reg_preprocessor.transformers[1][2])
     )
     for col in set(clf.num_cols_ + clf.cat_cols + reg_expected):
         if col not in input_df.columns:
@@ -142,22 +162,51 @@ def predict_flight_decision(
     wait_prob = float(model['clf'].predict_proba(input_df)[:, 1][0])
     decision = "WAIT" if wait_prob >= 0.5 else "BUY"
 
-    # Drop amount from regressor (target_log_ratio)
-    log_ratio = float(model['reg'].predict(input_df)[0])
-    current_price = float(feature_row["current_cheapest_price"])
-
-    # target_log_ratio = log1p(drop_ratio)  where drop_ratio = (current - future_min) / current
-    # → drop_ratio = expm1(log_ratio) = exp(log_ratio) - 1
-    # → future_min  = current * (1 - drop_ratio)
-    drop_ratio_pred = math.expm1(log_ratio)
-    predicted_drop_amount = max(0.0, current_price * drop_ratio_pred)
-    predicted_future_min_price = current_price - predicted_drop_amount
-
     # Override: 분류기가 WAIT이더라도 예측 절감액이 3% 미만이면 BUY
-    # target_wait 레이블 정의(≥3% 하락)와 일치
     MIN_WAIT_RATIO = 0.03
-    if decision == "WAIT" and (predicted_drop_amount / current_price) < MIN_WAIT_RATIO:
+
+    # 절감액 계산: conformal 우선, 없으면 XGBoost fallback
+    # 결정 보정: 회귀 예측 drop < 3%이면 WAIT 철회
+    log_ratio = float(model['reg'].predict(input_df)[0])
+    drop_ratio_pred = math.expm1(log_ratio)
+    reg_drop_amount = max(0.0, current_price * drop_ratio_pred)
+    if decision == "WAIT" and (reg_drop_amount / current_price) < MIN_WAIT_RATIO:
         decision = "BUY"
+
+    # 절감액 계산: conformal 기반 (결정은 이미 위에서 확정)
+    if forecaster is not None:
+        try:
+            fc  = forecaster.forecast(feature_row)
+            idx = _horizon_index(days)
+            q10 = float(fc['q10'][idx])
+            q50 = float(fc['q50'][idx])
+            q90 = float(fc['q90'][idx])
+
+            if decision == "WAIT":
+                # 기다리면 최대 이만큼 아낄 수 있음 (낙관적 하한 기준)
+                predicted_drop_amount      = max(0.0, current_price - q10)
+                predicted_future_min_price = q10
+                # conformal도 유의미한 하락을 예측하지 않으면 BUY로 전환
+                if predicted_drop_amount / current_price < MIN_WAIT_RATIO:
+                    decision                   = "BUY"
+                    predicted_drop_amount      = max(0.0, q90 - current_price)
+                    predicted_future_min_price = q50
+            else:
+                # 지금 안 사면 최대 이만큼 더 낼 수 있음 (비관적 상한 기준)
+                predicted_drop_amount      = max(0.0, q90 - current_price)
+                predicted_future_min_price = q50
+
+        except Exception:
+            forecaster = None
+
+    if forecaster is None:
+        # fallback: XGBoost 기반
+        if decision == "WAIT":
+            predicted_drop_amount      = reg_drop_amount
+            predicted_future_min_price = current_price - reg_drop_amount
+        else:
+            predicted_drop_amount      = 0.0
+            predicted_future_min_price = current_price
 
     return {
         "decision": decision,
