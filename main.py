@@ -56,12 +56,17 @@ def predict(request: FlightFeatureRequest):
 
     Response:
         decision               : "BUY" | "WAIT"
-        predicted_drop_amount  : 예측 가격 하락폭 (₩)
-        predicted_future_min_price : 예측 미래 최저가 (₩)
+        predicted_drop_amount  :
+            WAIT → 기다리면 최대 절감 가능 금액 (current - conformal q10)
+            BUY  → 지금 안 사면 최대 추가 부담 금액 (conformal q90 - current)
+        predicted_future_min_price :
+            WAIT → conformal q10 (낙관적 미래 최저가)
+            BUY  → conformal q50 (예상 미래 가격)
     """
     result = predict_flight_decision(
         feature_row=request.model_dump(),
         model=_xgb_model,
+        forecaster=_forecaster,
     )
     return result
 
