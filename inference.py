@@ -158,22 +158,21 @@ def predict_flight_decision(
         if col not in input_df.columns:
             input_df[col] = np.nan
 
-    # BUY/WAIT from classifier
+    MIN_WAIT_RATIO    = 0.03
+    CLF_THRESH_LONG   = 0.50   # D > 30: 학습 범위 내, 기본 threshold
+    CLF_THRESH_SHORT  = 0.60   # D ≤ 30: OOD 구간, 보수적 threshold (더 확실할 때만 WAIT)
+    clf_thresh = CLF_THRESH_SHORT if days <= 30 else CLF_THRESH_LONG
+
     wait_prob = float(model['clf'].predict_proba(input_df)[:, 1][0])
-    decision = "WAIT" if wait_prob >= 0.5 else "BUY"
+    clf_wait  = wait_prob >= clf_thresh
 
-    # Override: 분류기가 WAIT이더라도 예측 절감액이 3% 미만이면 BUY
-    MIN_WAIT_RATIO = 0.03
-
-    # 절감액 계산: conformal 우선, 없으면 XGBoost fallback
-    # 결정 보정: 회귀 예측 drop < 3%이면 WAIT 철회
+    # 회귀 예측 (D > 60 결정 및 fallback용)
     log_ratio = float(model['reg'].predict(input_df)[0])
-    drop_ratio_pred = math.expm1(log_ratio)
-    reg_drop_amount = max(0.0, current_price * drop_ratio_pred)
-    if decision == "WAIT" and (reg_drop_amount / current_price) < MIN_WAIT_RATIO:
-        decision = "BUY"
+    reg_drop_amount = max(0.0, current_price * math.expm1(log_ratio))
+    reg_wait  = (reg_drop_amount / current_price) >= MIN_WAIT_RATIO
 
-    # 절감액 계산: conformal 기반 (결정은 이미 위에서 확정)
+    # ── conformal 예측 ──────────────────────────────────────────────
+    q10 = q50 = q90 = None
     if forecaster is not None:
         try:
             fc  = forecaster.forecast(feature_row)
@@ -181,26 +180,43 @@ def predict_flight_decision(
             q10 = float(fc['q10'][idx])
             q50 = float(fc['q50'][idx])
             q90 = float(fc['q90'][idx])
-
-            if decision == "WAIT":
-                # 기다리면 최대 이만큼 아낄 수 있음 (낙관적 하한 기준)
-                predicted_drop_amount      = max(0.0, current_price - q10)
-                predicted_future_min_price = q10
-                # conformal도 유의미한 하락을 예측하지 않으면 BUY로 전환
-                if predicted_drop_amount / current_price < MIN_WAIT_RATIO:
-                    decision                   = "BUY"
-                    predicted_drop_amount      = max(0.0, q90 - current_price)
-                    predicted_future_min_price = q50
-            else:
-                # 지금 안 사면 최대 이만큼 더 낼 수 있음 (비관적 상한 기준)
-                predicted_drop_amount      = max(0.0, q90 - current_price)
-                predicted_future_min_price = q50
-
         except Exception:
             forecaster = None
 
-    if forecaster is None:
-        # fallback: XGBoost 기반
+    conf_drop = ((current_price - q50) / current_price) if q50 is not None else 0.0
+    conf_wait = conf_drop >= MIN_WAIT_RATIO
+
+    # ── 구간별 결정 로직 ────────────────────────────────────────────
+    if days > 60:
+        # 분류기 주도 + 회귀 보정 (학습 범위 내, conformal 14d는 단기 참고용)
+        decision = "WAIT" if (clf_wait and reg_wait) else "BUY"
+
+    elif days > 30:
+        # 분류기 AND conformal +14d 둘 다 동의해야 WAIT
+        decision = "WAIT" if (clf_wait and conf_wait) else "BUY"
+
+    elif days > 14:
+        # conformal +7d 주도, clf 보조 (둘 다 동의해야 WAIT)
+        decision = "WAIT" if (conf_wait and clf_wait) else "BUY"
+
+    elif days > 7:
+        # conformal +3d 주도, clf 보조
+        decision = "WAIT" if (conf_wait and clf_wait) else "BUY"
+
+    else:
+        # conformal +1d 주도, clf 보조
+        decision = "WAIT" if (conf_wait and clf_wait) else "BUY"
+
+    # ── 절감액 계산 (결정 방향과 일치하도록) ────────────────────────
+    if q50 is not None:
+        if decision == "WAIT":
+            predicted_drop_amount      = max(0.0, current_price - q10)
+            predicted_future_min_price = q10
+        else:
+            predicted_drop_amount      = max(0.0, q90 - current_price)
+            predicted_future_min_price = q50
+    else:
+        # conformal 없을 때 XGBoost fallback
         if decision == "WAIT":
             predicted_drop_amount      = reg_drop_amount
             predicted_future_min_price = current_price - reg_drop_amount
