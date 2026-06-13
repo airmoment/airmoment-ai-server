@@ -52,6 +52,7 @@ class ConformalForecaster:
 
     def __init__(self, model_path: str | Path) -> None:
         bundle = joblib.load(model_path)
+        self._bundle       = bundle
         self.models:       dict[int, object]              = bundle['models']
         self.conf_corr:    dict                           = bundle['conf']
         self.encoders:     dict[str, dict[str, int]]      = bundle['encoders']
@@ -96,6 +97,58 @@ class ConformalForecaster:
             'q75': [current_price] + [q75 for _, _, _, _, q75, _ in result_forecasts],
             'q90': [current_price] + [q90 for _, _, _, _, _, q90 in result_forecasts],
         }
+
+
+# ---------------------------------------------------------------------------
+# forecast_with_reasons  ← 백엔드 단일 호출용
+# ---------------------------------------------------------------------------
+
+def forecast_with_reasons(
+    features: dict,
+    forecaster: ConformalForecaster,
+    top_n: int = 3,
+) -> dict:
+    """예측값(conformal bands) + SHAP 판단 근거를 한 번에 반환.
+
+    Returns
+    -------
+    {
+        'current_price': 510000,
+        'x':   [0, 1, 3, 7, 14],
+        'q10': [...], 'q25': [...], 'q50': [...], 'q75': [...], 'q90': [...],
+        'explanations': [
+            {
+                'horizon_days':     1,
+                'direction':        'up',
+                'direction_amount': 91099,
+                'reasons': ['문장1', '문장2', '문장3']
+            },
+            ...
+        ]
+    }
+    """
+    from explain import explain_forecast   # 순환참조 방지용 lazy import
+
+    base          = forecaster.forecast(features)
+    current_price = base['current_price']
+
+    explanations = []
+    for i, h in enumerate(base['x'][1:], 1):
+        exp = explain_forecast(
+            features,
+            forecaster._bundle,
+            horizon=h,
+            top_n=top_n,
+            current_price=current_price,
+        )
+        explanations.append({
+            'horizon_days':     h,
+            'direction':        exp['direction'],
+            'direction_amount': exp['direction_amount'],
+            'reasons':          exp['reasons'],
+        })
+
+    return {**base, 'explanations': explanations}
 
 
 # ---------------------------------------------------------------------------
