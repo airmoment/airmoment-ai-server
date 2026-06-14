@@ -152,6 +152,20 @@ _TEMPLATE_MAP = {
     for feat, pos, neg, fmt, validate in FEATURE_TEMPLATES
 }
 
+# LightGBM 전용 템플릿 override
+# pos: LGB shap>0 = 가격 상승 기여 → BUY 이유
+# neg: LGB shap<0 = 가격 하락 기여 → WAIT 이유 (None이면 기존 neg_tmpl 그대로)
+_LGB_OVERRIDES: dict[str, tuple[str | None, str | None]] = {
+    'rolling_std_3': (
+        '최근 가격 변동이 커 더 오르기 전에 구매하는 것이 유리할 수 있습니다',
+        None,
+    ),
+    'curr_vs_hist_mean': (
+        '현재 가격이 과거 평균보다 높아 더 오르기 전에 구매가 유리합니다',
+        None,
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # SHAP 계산
@@ -210,6 +224,7 @@ def _make_sentence(
     shap_val: float,
     feat_value: float,
     min_shap: float = 0.01,  # log-odds 기준 (CatBoost SHAP 단위)
+    use_lgb: bool = False,
 ) -> str | None:
     """SHAP 값과 feature 값을 받아 한국어 문장 반환. 영향 미미하면 None."""
     if abs(shap_val) < min_shap:
@@ -220,6 +235,14 @@ def _make_sentence(
         return None
 
     pos_tmpl, neg_tmpl, fmt_fn, validate = template
+
+    # LightGBM 전용 override 적용
+    if use_lgb and feat in _LGB_OVERRIDES:
+        lgb_pos, lgb_neg = _LGB_OVERRIDES[feat]
+        if shap_val > 0 and lgb_pos is not None:
+            pos_tmpl = lgb_pos
+        elif shap_val <= 0 and lgb_neg is not None:
+            neg_tmpl = lgb_neg
 
     # 방향 검증: SHAP 부호와 피처 값 부호가 일치하지 않으면 스킵
     if validate and not np.isnan(feat_value):
@@ -304,7 +327,7 @@ def explain_forecast(
     for feat, shap_val in ranked:
         if len(reasons) >= top_n:
             break
-        sentence = _make_sentence(feat, shap_val, float(features.get(feat, np.nan)), min_shap)
+        sentence = _make_sentence(feat, shap_val, float(features.get(feat, np.nan)), min_shap, use_lgb=(days <= 30))
         if sentence:
             reasons.append(sentence)
 
