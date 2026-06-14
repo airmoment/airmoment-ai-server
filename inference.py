@@ -45,7 +45,6 @@ class NativeCatBoostClassifier:
             self.num_imputer_.transform(X_num),
             columns=self.num_cols_,
         ).reset_index(drop=True)
-        present_cats = [c for c in self.cat_cols if c in X.columns]
         cat_part = (
             X.reindex(columns=self.cat_cols)
             .fillna('__missing__')
@@ -101,22 +100,61 @@ def load_model(
     }
 
 
+def _horizon_index(days_to_departure: int) -> int:
+    """days_to_departure 기준으로 conformal forecast horizon 인덱스 반환.
+    forecast['q10'] = [현재(0), +1d(1), +3d(2), +7d(3), +14d(4)]
+
+    D > 30  → +14d (D>60, D31~60 공통)
+    D 15~30 → +7d
+    D 8~14  → +3d
+    D ≤ 7   → +1d
+    """
+    if days_to_departure > 30:
+        return 4   # +14d
+    elif days_to_departure > 14:
+        return 3   # +7d
+    elif days_to_departure > 7:
+        return 2   # +3d
+    else:
+        return 1   # +1d
+
+
+MIN_WAIT_RATIO = 0.03          # target_wait 레이블 정의(≥3% 하락)와 일치
+CLF_THRESHOLD_STD  = 0.5      # D > 30 구간 (학습 범위 내)
+CLF_THRESHOLD_CONS = 0.6      # D ≤ 30 구간 (OOD, 보수적 WAIT)
+
+
 def predict_flight_decision(
     feature_row: Dict[str, Any],
     model: Dict[str, Any] | None = None,
+    forecaster: Any | None = None,
 ) -> Dict[str, Any]:
     """
-    Run inference for a single feature row and return a map-like response.
+    Run inference for a single feature row.
 
-    - BUY/WAIT decision : CatBoost classifier (predict_proba threshold 0.5)
-    - Drop amount       : XGBoost regressor (target_log_ratio → KRW via current price)
+    Decision logic (구간별 단일 조건, override 없음):
+
+      D > 60  : clf ≥ 0.5  AND  reg_drop ≥ 3%
+                → WAIT 절감액 = reg 기반 / BUY 절감액 = conformal q90
+
+      D 31~60 : clf ≥ 0.5  AND  conf_drop[+14d] ≥ 3%
+                → WAIT 절감액 = current - q10[+14d]
+
+      D 15~30 : conf_drop[+7d] ≥ 3%  AND  clf ≥ 0.6
+                → WAIT 절감액 = current - q10[+7d]
+
+      D 8~14  : conf_drop[+3d] ≥ 3%  AND  clf ≥ 0.6
+                → WAIT 절감액 = current - q10[+3d]
+
+      D ≤ 7   : conf_drop[+1d] ≥ 3%  AND  clf ≥ 0.6
+                → WAIT 절감액 = current - q10[+1d]
+
+    절감액 의미:
+      WAIT → 기다리면 최대 이만큼 아낄 수 있음 (낙관적 하한 q10 기준)
+      BUY  → 지금 안 사면 최대 이만큼 더 낼 수 있음 (비관적 상한 q90 기준)
 
     Returns:
-    {
-        "decision": "BUY" or "WAIT",
-        "predicted_drop_amount": float,
-        "predicted_future_min_price": float
-    }
+      { "decision", "wait_prob", "predicted_drop_amount", "predicted_future_min_price" }
     """
     if model is None:
         model = load_model()
@@ -124,37 +162,78 @@ def predict_flight_decision(
     if "current_cheapest_price" not in feature_row:
         raise ValueError("feature_row must include 'current_cheapest_price'")
 
-    input_df = pd.DataFrame([feature_row])
+    current_price = float(feature_row["current_cheapest_price"])
+    days          = int(feature_row.get("days_to_departure", 999))
 
-    # 학습 시 사용한 컬럼 중 누락된 것은 NaN으로 채움 (optional 피처 처리)
+    # ── 입력 준비 ──────────────────────────────────────────────────────────
     clf = model['clf']
     reg = model['reg']
-    reg_preprocessor = reg.named_steps['preprocessor']
     reg_expected = (
-        list(reg_preprocessor.transformers[0][2]) +  # numeric cols
-        list(reg_preprocessor.transformers[1][2])    # categorical cols
+        list(reg.named_steps['preprocessor'].transformers[0][2]) +
+        list(reg.named_steps['preprocessor'].transformers[1][2])
     )
+    input_df = pd.DataFrame([feature_row])
     for col in set(clf.num_cols_ + clf.cat_cols + reg_expected):
         if col not in input_df.columns:
             input_df[col] = np.nan
 
-    # BUY/WAIT from classifier
-    wait_prob = float(model['clf'].predict_proba(input_df)[:, 1][0])
-    decision = "WAIT" if wait_prob >= 0.5 else "BUY"
+    # ── 공통 신호 ──────────────────────────────────────────────────────────
+    wait_prob = float(clf.predict_proba(input_df)[:, 1][0])
+    reg_drop  = max(0.0, math.expm1(float(reg.predict(input_df)[0])))
 
-    # Drop amount from regressor (target_log_ratio)
-    log_ratio = float(model['reg'].predict(input_df)[0])
-    current_price = float(feature_row["current_cheapest_price"])
+    # ── Conformal 신호 ────────────────────────────────────────────────────
+    fc_ok = False
+    if forecaster is not None:
+        try:
+            fc  = forecaster.forecast(feature_row)
+            idx = _horizon_index(days)
+            q10 = float(fc['q10'][idx])
+            q50 = float(fc['q50'][idx])
+            q90 = float(fc['q90'][idx])
+            conf_drop = (current_price - q50) / current_price
+            fc_ok = True
+        except Exception:
+            pass
 
-    # log_ratio = log(future_price / current_price)
-    # → future_price = current_price * exp(log_ratio)
-    predicted_future_min_price = current_price * math.exp(log_ratio)
-    predicted_drop_amount = max(0.0, current_price - predicted_future_min_price)
+    # ── 구간별 결정 (단일 조건, override 없음) ────────────────────────────
+    if days > 60:
+        wait = (wait_prob >= CLF_THRESHOLD_STD) and (reg_drop >= MIN_WAIT_RATIO)
+        if wait:
+            amount = reg_drop * current_price
+            future = current_price - amount
+        else:
+            amount = max(0.0, q90 - current_price) if fc_ok else 0.0
+            future = max(q50, current_price) if fc_ok else current_price
+
+    elif days > 30:
+        if fc_ok:
+            wait = (wait_prob >= CLF_THRESHOLD_STD) and (conf_drop >= MIN_WAIT_RATIO)
+        else:
+            wait = (wait_prob >= CLF_THRESHOLD_STD) and (reg_drop >= MIN_WAIT_RATIO)
+        if wait:
+            amount = max(0.0, current_price - q10) if fc_ok else reg_drop * current_price
+            future = q10 if fc_ok else current_price - reg_drop * current_price
+        else:
+            amount = max(0.0, q90 - current_price) if fc_ok else 0.0
+            future = max(q50, current_price) if fc_ok else current_price
+
+    else:
+        if fc_ok:
+            wait = (conf_drop >= MIN_WAIT_RATIO) and (wait_prob >= CLF_THRESHOLD_CONS)
+        else:
+            wait = (wait_prob >= CLF_THRESHOLD_CONS) and (reg_drop >= MIN_WAIT_RATIO)
+        if wait:
+            amount = max(0.0, current_price - q10) if fc_ok else reg_drop * current_price
+            future = q10 if fc_ok else current_price - reg_drop * current_price
+        else:
+            amount = max(0.0, q90 - current_price) if fc_ok else 0.0
+            future = max(q50, current_price) if fc_ok else current_price
 
     return {
-        "decision": decision,
-        "predicted_drop_amount": predicted_drop_amount,
-        "predicted_future_min_price": predicted_future_min_price,
+        "decision":                   "WAIT" if wait else "BUY",
+        "wait_prob":                  wait_prob,
+        "predicted_drop_amount":      amount,
+        "predicted_future_min_price": future,
     }
 
 

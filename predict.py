@@ -99,6 +99,53 @@ class ConformalForecaster:
 
 
 # ---------------------------------------------------------------------------
+# forecast_with_reasons  ← 백엔드 단일 호출용
+# ---------------------------------------------------------------------------
+
+def forecast_with_reasons(
+    features: dict,
+    forecaster: ConformalForecaster,
+    model: dict,
+    top_n: int = 3,
+) -> dict:
+    """예측값(conformal bands) + CatBoost SHAP 판단 근거를 한 번에 반환.
+
+    Parameters
+    ----------
+    model : inference.load_model() 반환값 {'clf': ..., 'reg': ...}
+
+    Returns
+    -------
+    {
+        'current_price': 510000,
+        'x':   [0, 1, 3, 7, 14],
+        'q10': [...], 'q25': [...], 'q50': [...], 'q75': [...], 'q90': [...],
+        'explanation': {
+            'direction':        'down',
+            'direction_amount': 45000,
+            'reasons':          ['문장1', '문장2', '문장3']
+        }
+    }
+    """
+    from explain import explain_forecast
+    from inference import predict_flight_decision
+
+    base     = forecaster.forecast(features)
+    decision = predict_flight_decision(features, model, forecaster=forecaster)
+
+    exp = explain_forecast(
+        features,
+        clf=model['clf'],
+        forecaster=forecaster,
+        wait_prob=decision['wait_prob'],
+        drop_amount=decision['predicted_drop_amount'],
+        top_n=top_n,
+    )
+
+    return {**base, 'explanation': exp}
+
+
+# ---------------------------------------------------------------------------
 # Module-level convenience
 # ---------------------------------------------------------------------------
 
