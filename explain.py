@@ -243,7 +243,7 @@ def explain_forecast(
     features: dict,
     clf,
     forecaster,
-    wait_prob: float,
+    is_wait: bool,
     drop_amount: float,
     top_n: int = 3,
 ) -> dict:
@@ -258,7 +258,7 @@ def explain_forecast(
     features    : feature dict
     clf         : NativeCatBoostClassifier
     forecaster  : ConformalForecaster (LightGBM 번들)
-    wait_prob   : CatBoost WAIT 확률
+    is_wait     : 실제 결정이 WAIT이면 True (임계값 적용 후 결정 기준)
     drop_amount : 절감 예상액 (KRW)
     top_n       : 반환할 근거 문장 수
 
@@ -281,7 +281,7 @@ def explain_forecast(
 
     # WAIT → 가격 하락 예상 → direction='down'
     # BUY  → 가격 상승/유지 → direction='up'
-    direction = 'down' if wait_prob >= 0.5 else 'up'
+    direction = 'down' if is_wait else 'up'
 
     # direction 과 일치하는 부호의 SHAP만 사용해 이유와 결정이 항상 align되게 함.
     # CatBoost (D>30): shap > 0 = WAIT 쪽 기여, shap < 0 = BUY 쪽 기여

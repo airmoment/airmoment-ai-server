@@ -137,7 +137,7 @@ def forecast_with_reasons(
         features,
         clf=model['clf'],
         forecaster=forecaster,
-        wait_prob=decision['wait_prob'],
+        is_wait=(decision['decision'] == 'WAIT'),
         drop_amount=decision['predicted_drop_amount'],
         top_n=top_n,
     )

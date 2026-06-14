@@ -113,7 +113,7 @@ for name, features in CASES.items():
 
     exp = explain_forecast(
         features, clf=clf, forecaster=forecaster,
-        wait_prob=wait_prob, drop_amount=0, top_n=3,
+        is_wait=(wait_prob >= 0.5), drop_amount=0, top_n=3,
     )
 
     print(f'\n[{name}]')
@@ -276,7 +276,7 @@ for _, row in df_sample.head(N_EVAL).iterrows():
     decision = 'WAIT' if wait_prob >= 0.5 else 'BUY'
     exp = explain_forecast(
         feat_dict, clf=clf, forecaster=forecaster,
-        wait_prob=wait_prob, drop_amount=0, top_n=3,
+        is_wait=(wait_prob >= 0.5), drop_amount=0, top_n=3,
     )
     cases.append({'decision': decision, 'reasons': exp['reasons']})
 
