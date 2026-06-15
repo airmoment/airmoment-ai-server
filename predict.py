@@ -52,7 +52,6 @@ class ConformalForecaster:
 
     def __init__(self, model_path: str | Path) -> None:
         bundle = joblib.load(model_path)
-        self._bundle       = bundle
         self.models:       dict[int, object]              = bundle['models']
         self.conf_corr:    dict                           = bundle['conf']
         self.encoders:     dict[str, dict[str, int]]      = bundle['encoders']
@@ -100,15 +99,20 @@ class ConformalForecaster:
 
 
 # ---------------------------------------------------------------------------
-# forecast_with_reasons  ← 백엔드 단일 호출용
+# forecast_with_reasons ← 백엔드 단일 호출용
 # ---------------------------------------------------------------------------
 
 def forecast_with_reasons(
     features: dict,
     forecaster: ConformalForecaster,
+    model: dict,
     top_n: int = 3,
 ) -> dict:
-    """예측값(conformal bands) + SHAP 판단 근거를 한 번에 반환.
+    """예측값(conformal bands) + CatBoost/LightGBM SHAP 판단 근거를 한 번에 반환.
+
+    Parameters
+    ----------
+    model : inference.load_model() 반환값 {'clf': ..., 'reg': ...}
 
     Returns
     -------
@@ -116,39 +120,29 @@ def forecast_with_reasons(
         'current_price': 510000,
         'x':   [0, 1, 3, 7, 14],
         'q10': [...], 'q25': [...], 'q50': [...], 'q75': [...], 'q90': [...],
-        'explanations': [
-            {
-                'horizon_days':     1,
-                'direction':        'up',
-                'direction_amount': 91099,
-                'reasons': ['문장1', '문장2', '문장3']
-            },
-            ...
-        ]
+        'explanation': {
+            'direction':        'down',
+            'direction_amount': 45000,
+            'reasons':          ['문장1', '문장2', '문장3']
+        }
     }
     """
-    from explain import explain_forecast   # 순환참조 방지용 lazy import
+    from explain import explain_forecast
+    from inference import predict_flight_decision
 
-    base          = forecaster.forecast(features)
-    current_price = base['current_price']
+    base     = forecaster.forecast(features)
+    decision = predict_flight_decision(features, model, forecaster=forecaster)
 
-    explanations = []
-    for i, h in enumerate(base['x'][1:], 1):
-        exp = explain_forecast(
-            features,
-            forecaster._bundle,
-            horizon=h,
-            top_n=top_n,
-            current_price=current_price,
-        )
-        explanations.append({
-            'horizon_days':     h,
-            'direction':        exp['direction'],
-            'direction_amount': exp['direction_amount'],
-            'reasons':          exp['reasons'],
-        })
+    exp = explain_forecast(
+        features,
+        clf=model['clf'],
+        forecaster=forecaster,
+        is_wait=(decision['decision'] == 'WAIT'),
+        drop_amount=decision['predicted_drop_amount'],
+        top_n=top_n,
+    )
 
-    return {**base, 'explanations': explanations}
+    return {**base, 'explanation': exp}
 
 
 # ---------------------------------------------------------------------------

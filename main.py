@@ -1,10 +1,11 @@
 import joblib
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 from inference import load_model, predict_flight_decision
 from predict import load_forecaster
+from explain import explain_forecast
 
 app = FastAPI()
 
@@ -140,3 +141,83 @@ def forecast_price(request: ForecastRequest):
         return _forecaster.forecast(request.model_dump())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"forecast failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# /explain  —  예측 근거 설명 (SHAP)
+# ---------------------------------------------------------------------------
+
+class ExplainRequest(BaseModel):
+
+    # 필수
+    route_id: str
+    current_cheapest_price: int
+
+    # 항공편 기본 정보
+    days_to_departure: Optional[int] = None
+    outbound_month: Optional[int] = Field(default=None, ge=1, le=12)
+    searched_day_of_week: Optional[str] = None
+    outbound_day_of_week: Optional[str] = None
+    is_weekend_search: Optional[int] = None
+    is_peak_season: Optional[int] = None
+    is_holiday_near: Optional[int] = None
+    is_long_haul: Optional[int] = None
+    offer_count: Optional[int] = None
+    nonstop_ratio: Optional[float] = None
+    cheapest_nonstop_price: Optional[int] = None
+    cheapest_offer_has_layover: Optional[int] = None
+
+    # 가격 수준
+    price_level: Optional[str] = None
+
+    # 히스토리 기반
+    curr_gap_to_typical_min: Optional[int] = None
+    curr_gap_to_typical_max: Optional[int] = None
+    hist_recent_std: Optional[float] = None
+    hist_recent_slope: Optional[float] = None
+    curr_vs_hist_mean: Optional[float] = None
+
+    # 단기 시계열
+    lag_1_price: Optional[int] = None
+    price_change_1: Optional[int] = None
+    rolling_std_3: Optional[float] = None
+    price_vs_rolling_mean_3: Optional[int] = None
+
+    # 외부 요인 (7d / 14d 모델만 사용)
+    oil_price_usd: Optional[float] = None
+    oil_change_7d: Optional[float] = None
+    arr_fx_change_7d: Optional[float] = None
+
+
+class ExplainResponse(BaseModel):
+    direction: Literal["up", "down"]
+    direction_amount: int
+    reasons: List[str]
+
+
+@app.post("/explain", response_model=ExplainResponse)
+def explain(request: ExplainRequest):
+    """
+    BUY/WAIT 판단 근거 설명 (SHAP 기반 한국어 문장).
+
+    /predict와 동일한 로직(predict_flight_decision)으로 먼저 BUY/WAIT을 결정하고,
+    그 결정과 align된 SHAP 근거 문장을 반환한다.
+
+    Response:
+        direction        : 'down'(WAIT, 가격 하락 예상) | 'up'(BUY, 가격 상승/유지 예상)
+        direction_amount : 절감/추가부담 예상액 (KRW)
+        reasons          : 근거 문장 목록
+    """
+    features = request.model_dump()
+    try:
+        decision = predict_flight_decision(features, _xgb_model, forecaster=_forecaster)
+        return explain_forecast(
+            features,
+            clf=_xgb_model['clf'],
+            forecaster=_forecaster,
+            is_wait=(decision['decision'] == 'WAIT'),
+            drop_amount=decision['predicted_drop_amount'],
+            top_n=3,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"explain failed: {e}")
