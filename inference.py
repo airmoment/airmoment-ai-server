@@ -101,7 +101,7 @@ def load_model(
     }
 
 
-def _horizon_index(days_to_departure: int) -> int:
+def horizon_index(days_to_departure: int) -> int:
     """days_to_departure 기준으로 conformal forecast horizon 인덱스 반환.
     forecast['q10'] = [현재, +1d, +3d, +7d, +14d] → 인덱스 0~4
     """
@@ -143,7 +143,8 @@ def predict_flight_decision(
         raise ValueError("feature_row must include 'current_cheapest_price'")
 
     current_price = float(feature_row["current_cheapest_price"])
-    days = int(feature_row.get("days_to_departure", 999))
+    days_raw = feature_row.get("days_to_departure")
+    days = int(days_raw) if days_raw is not None else 999
     input_df = pd.DataFrame([feature_row])
 
     # 학습 시 사용한 컬럼 중 누락된 것은 NaN으로 채움
@@ -176,7 +177,7 @@ def predict_flight_decision(
     if forecaster is not None:
         try:
             fc  = forecaster.forecast(feature_row)
-            idx = _horizon_index(days)
+            idx = horizon_index(days)
             q10 = float(fc['q10'][idx])
             q50 = float(fc['q50'][idx])
             q90 = float(fc['q90'][idx])

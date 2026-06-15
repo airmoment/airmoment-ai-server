@@ -7,15 +7,29 @@ SHAP 기반 모델 판단 근거 생성.
 
 사용법:
     from explain import explain_forecast
-    result = explain_forecast(features, bundle, horizon=1)
+    from inference import load_model, predict_flight_decision
+    from predict import load_forecaster
+
+    model      = load_model()
+    forecaster = load_forecaster('airmoment_forecast.joblib')
+    decision   = predict_flight_decision(features, model, forecaster=forecaster)
+
+    result = explain_forecast(
+        features,
+        clf=model['clf'],
+        forecaster=forecaster,
+        is_wait=(decision['decision'] == 'WAIT'),
+        drop_amount=decision['predicted_drop_amount'],
+        top_n=3,
+    )
 
     result = {
-        'q50': 567377,
-        'direction': 'up',           # 현재가 대비 예측 방향
+        'direction':        'down',      # 'down' | 'up'
+        'direction_amount': 45000,       # 절감/추가부담 예상액 (KRW)
         'reasons': [
-            '최근 가격이 오르는 추세입니다',
-            '현재 가격이 과거 평균보다 낮아 상승 여지가 있습니다',
-            '출발일이 21일 남아 구매 압력이 높아지고 있습니다',
+            '현재 가격이 과거 평균보다 높아 하락 여지가 있습니다',
+            '최근 가격이 올라 현재가가 높은 상태입니다',
+            '국제 유가가 높아 현재 항공권 가격이 비싼 편입니다',
         ]
     }
 """
@@ -29,8 +43,9 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # Feature → 한국어 문장 매핑
 # ---------------------------------------------------------------------------
-# 각 항목: (feature명, 양수 SHAP 문장, 음수 SHAP 문장, 값 포맷 함수)
-# 포맷 함수: feature 값을 받아 문장에 삽입할 문자열 반환 (None이면 값 미사용)
+# 각 항목: (feature명, SHAP>0 문장, SHAP<0 문장, 값 포맷 함수, 방향 검증 여부)
+# 포맷 함수  : feature 값을 받아 문장에 삽입할 문자열 반환 (None이면 값 미사용)
+# 방향 검증 : True면 feature 값의 부호와 SHAP 값의 부호가 일치할 때만 문장을 사용
 
 def _days(v):   return f'{int(v)}일'
 def _krw(v):    return f'₩{int(v):,}'
@@ -40,114 +55,128 @@ def _month(v):
               7:'7월',8:'8월',9:'9월',10:'10월',11:'11월',12:'12월'}
     return months.get(int(v), f'{int(v)}월')
 
-FEATURE_TEMPLATES: list[tuple[str, str, str, object]] = [
-    # (feature명, SHAP>0 문장, SHAP<0 문장, 값 포맷 함수)
+FEATURE_TEMPLATES: list[tuple] = [
+    # (feature명, SHAP>0 문장, SHAP<0 문장, 값 포맷 함수, 방향 검증)
 
     ('days_to_departure',
      '출발까지 {v} 남아 가격 상승 압력이 높아지고 있습니다',
      '출발까지 {v} 남아 있어 가격이 낮은 편입니다',
-     _days),
+     _days, False),
 
     ('current_cheapest_price',
      '현재가({v})가 높아 이후에도 높게 유지될 가능성이 있습니다',
      '현재가({v})가 낮아 이후에도 낮게 유지될 가능성이 있습니다',
-     _krw),
+     _krw, False),
 
     ('lag_1_price',
      '직전 검색 대비 가격이 올랐습니다',
      '직전 검색 대비 가격이 내렸습니다',
-     None),
+     None, False),
 
     ('price_change_1',
-     '최근 가격이 오르는 추세입니다',
-     '최근 가격이 내리는 추세입니다',
-     None),
+     '최근 가격이 올라 현재가가 높은 상태입니다',
+     '최근 가격이 하락해 현재가가 저렴한 상태입니다',
+     None, True),
 
     ('hist_recent_slope',
      '최근 며칠간 가격이 지속적으로 상승하고 있습니다',
      '최근 며칠간 가격이 지속적으로 하락하고 있습니다',
-     None),
+     None, True),
 
     ('curr_vs_hist_mean',
-     '현재 가격이 과거 평균보다 높아 추가 상승 여지는 제한적입니다',
-     '현재 가격이 과거 평균보다 낮아 상승 여지가 있습니다',
-     None),
+     '현재 가격이 과거 평균보다 높아 하락 여지가 있습니다',
+     '현재 가격이 과거 평균보다 낮은 수준입니다',
+     None, False),
 
     ('curr_gap_to_typical_min',
      '현재 가격이 통상 최저가보다 높습니다',
      '현재 가격이 통상 최저가보다 낮은 수준입니다',
-     None),
+     None, True),
 
     ('curr_gap_to_typical_max',
      '현재 가격이 통상 최고가에 근접해 있습니다',
      '현재 가격이 통상 최고가보다 많이 낮습니다',
-     None),
+     None, True),
 
     ('cheapest_nonstop_price',
      '직항 최저가가 높아 전반적인 가격대가 높습니다',
      '직항 최저가가 낮아 전반적인 가격대가 낮습니다',
-     None),
+     None, False),
 
     ('nonstop_ratio',
      '직항 비율이 높아 가격대가 높습니다',
      '직항 비율이 낮아 경유편 위주로 가격이 낮습니다',
-     None),
+     None, False),
 
     ('rolling_std_3',
-     '최근 가격 변동성이 커 불확실성이 높습니다',
+     '최근 가격 변동이 심해 조금 더 지켜보는 것이 유리합니다',
      '최근 가격이 안정적으로 유지되고 있습니다',
-     None),
+     None, False),
 
     ('price_vs_rolling_mean_3',
      '현재 가격이 최근 평균보다 높습니다',
      '현재 가격이 최근 평균보다 낮습니다',
-     None),
+     None, True),
 
     ('is_peak_season',
      '성수기(7·8·12월)라 가격이 높은 편입니다',
      None,   # 비성수기는 굳이 언급 안 해도 됨
-     None),
+     None, True),
 
     ('is_holiday_near',
      '한국 공휴일 전후라 수요가 높아 가격이 오릅니다',
      None,
-     None),
+     None, True),
 
     ('is_long_haul',
      '장거리 노선이라 기본 가격대가 높습니다',
      None,
-     None),
+     None, False),
 
     ('oil_price_usd',
-     '국제 유가가 높아 항공권 가격 상승 요인이 있습니다',
+     '국제 유가가 높아 현재 항공권 가격이 비싼 편입니다',
      '국제 유가가 낮아 항공권 가격 하락 요인이 있습니다',
-     None),
+     None, False),
 
     ('oil_change_7d',
-     '최근 7일간 유가가 상승해 가격 상승 압력이 있습니다',
+     '최근 유가 상승으로 현재 항공권 가격이 높아진 상태입니다',
      '최근 7일간 유가가 하락해 가격 하락 압력이 있습니다',
-     None),
+     None, True),
 
     ('arr_fx_change_7d',
      '도착국 통화 강세로 원화 환산 가격이 오를 수 있습니다',
      '도착국 통화 약세로 원화 환산 가격이 내릴 수 있습니다',
-     None),
+     None, True),
 
     ('route_id_enc',
      '이 노선은 가격이 높게 형성되는 경향이 있습니다',
      '이 노선은 가격이 낮게 형성되는 경향이 있습니다',
-     None),
+     None, False),
 
     ('outbound_month',
      '{v} 출발은 가격이 높은 시기입니다',
      '{v} 출발은 가격이 낮은 시기입니다',
-     _month),
+     _month, False),
 ]
 
-# feature명 → (양수문장, 음수문장, 포맷함수) 빠른 조회용 dict
+# feature명 → (양수문장, 음수문장, 포맷함수, 방향검증) 빠른 조회용 dict
 _TEMPLATE_MAP = {
-    feat: (pos, neg, fmt)
-    for feat, pos, neg, fmt in FEATURE_TEMPLATES
+    feat: (pos, neg, fmt, validate)
+    for feat, pos, neg, fmt, validate in FEATURE_TEMPLATES
+}
+
+# LightGBM 전용 override (D≤30, 가격 자체에 대한 SHAP)
+# pos: shap>0 (가격 상승 기여 → BUY 이유), neg: shap<=0 (가격 하락 기여 → WAIT 이유)
+# None이면 _TEMPLATE_MAP의 기본 문장을 그대로 사용
+_LGB_OVERRIDES: dict[str, tuple[str | None, str | None]] = {
+    'rolling_std_3': (
+        '최근 가격 변동이 커 더 오르기 전에 구매하는 것이 유리할 수 있습니다',
+        None,
+    ),
+    'curr_vs_hist_mean': (
+        '현재 가격이 과거 평균보다 높아 더 오르기 전에 구매가 유리합니다',
+        None,
+    ),
 }
 
 
@@ -155,18 +184,47 @@ _TEMPLATE_MAP = {
 # SHAP 계산
 # ---------------------------------------------------------------------------
 
-def get_shap_values(
-    model,
-    X: np.ndarray,
-    feat_cols: list[str],
-) -> dict[str, float]:
+# forecast['q10'] 인덱스(horizon_index) → 실제 horizon 일수
+_INDEX_TO_HORIZON = {1: 1, 2: 3, 3: 7, 4: 14}
+
+
+def get_catboost_shap(clf, features: dict) -> dict[str, float]:
     """
-    LightGBM pred_contrib=True 로 SHAP 값 추출.
-    반환: {feature명: shap_value}  (bias 항 제외)
-    마지막 열이 bias(expected value)이므로 제거.
+    CatBoost ShapValues로 BUY/WAIT 분류 결정에 대한 feature 기여도 추출.
+    반환: {feature명: shap_value}  (bias 항 제외, log-odds 단위)
     """
-    contrib = model.predict(X, pred_contrib=True)   # shape: (n_samples, n_features+1)
-    shap    = contrib[0, :-1]                        # 샘플 1개, bias 제외
+    from catboost import Pool
+
+    input_df = pd.DataFrame([features])
+    for col in clf.num_cols_ + clf.cat_cols:
+        if col not in input_df.columns:
+            input_df[col] = np.nan
+
+    X_prep      = clf._prepare(input_df)
+    cat_indices = [X_prep.columns.tolist().index(c)
+                   for c in clf.cat_cols if c in X_prep.columns]
+    shap_values = clf.model_.get_feature_importance(
+        Pool(X_prep, cat_features=cat_indices),
+        type='ShapValues',
+    )
+    shap = shap_values[0, :-1]   # 마지막 열 = bias
+    return dict(zip(X_prep.columns.tolist(), shap))
+
+
+def get_lightgbm_shap(forecaster, features: dict, days_to_departure: int) -> dict[str, float]:
+    """
+    LightGBM pred_contrib=True 로 가격 예측에 대한 feature 기여도 추출.
+    days_to_departure를 /predict와 동일한 horizon_index로 매핑해 모델 선택.
+    반환: {feature명: shap_value}  (bias 항 제외, KRW 단위)
+    """
+    from inference import horizon_index
+
+    horizon   = _INDEX_TO_HORIZON[horizon_index(days_to_departure)]
+    model     = forecaster.models[horizon]
+    feat_cols = forecaster.feature_cols[horizon]
+    X         = forecaster._encode(features, feat_cols)
+    contrib   = model.predict(X, pred_contrib=True)
+    shap      = contrib[0, :-1]
     return dict(zip(feat_cols, shap))
 
 
@@ -178,7 +236,8 @@ def _make_sentence(
     feat: str,
     shap_val: float,
     feat_value: float,
-    min_shap: float = 500,   # 이 이하면 무시 (영향 미미)
+    min_shap: float = 0.01,
+    use_lgb: bool = False,
 ) -> str | None:
     """SHAP 값과 feature 값을 받아 한국어 문장 반환. 영향 미미하면 None."""
     if abs(shap_val) < min_shap:
@@ -188,7 +247,20 @@ def _make_sentence(
     if template is None:
         return None
 
-    pos_tmpl, neg_tmpl, fmt_fn = template
+    pos_tmpl, neg_tmpl, fmt_fn, validate = template
+
+    if use_lgb and feat in _LGB_OVERRIDES:
+        lgb_pos, lgb_neg = _LGB_OVERRIDES[feat]
+        if shap_val > 0 and lgb_pos is not None:
+            pos_tmpl = lgb_pos
+        elif shap_val <= 0 and lgb_neg is not None:
+            neg_tmpl = lgb_neg
+
+    # 방향 검증: feature 값의 부호와 SHAP 값의 부호가 다르면 문장이 의미상 맞지 않으므로 스킵
+    if validate and not np.isnan(feat_value):
+        if (feat_value > 0) != (shap_val > 0):
+            return None
+
     tmpl = pos_tmpl if shap_val > 0 else neg_tmpl
     if tmpl is None:
         return None
@@ -204,94 +276,80 @@ def _make_sentence(
 
 def explain_forecast(
     features: dict,
-    bundle: dict,
-    horizon: int = 1,
+    clf,
+    forecaster,
+    is_wait: bool,
+    drop_amount: float,
     top_n: int = 3,
-    current_price: int | None = None,
 ) -> dict:
     """
-    특정 horizon 모델의 예측 근거를 한국어 문장으로 반환.
+    days_to_departure 기준으로 SHAP 출처를 분기해 BUY/WAIT 판단 근거를 반환한다.
+
+      D > 30 : CatBoost 분류기가 1차 조건 → CatBoost SHAP  (log-odds 단위)
+      D ≤ 30 : conformal(LightGBM)이 1차 조건 → LightGBM SHAP (KRW 단위)
 
     Parameters
     ----------
-    features   : predict.py에 넘기는 것과 같은 feature dict
-    bundle     : joblib.load('airmoment_model.joblib')
-    horizon    : 1 | 3 | 7 | 14
-    top_n      : 반환할 근거 문장 수 (기본 3개)
-    current_price : 현재가 (없으면 features에서 추출)
+    features    : feature dict (predict.py / inference.py에 넘기는 것과 동일)
+    clf         : NativeCatBoostClassifier (model['clf'])
+    forecaster  : ConformalForecaster
+    is_wait     : 실제 결정이 WAIT이면 True (predict_flight_decision 결과 기준)
+    drop_amount : 절감/추가부담 예상액 (KRW, predicted_drop_amount)
+    top_n       : 반환할 근거 문장 수
 
     Returns
     -------
     {
-        'horizon_days': 1,
-        'q50': 567377,
-        'direction': 'up' | 'down' | 'flat',
-        'direction_amount': 57377,   # 현재가 대비 예측 중앙값 차이
-        'reasons': ['...', '...', '...']
+        'direction':        'down' | 'up',
+        'direction_amount': 45000,
+        'reasons':          ['...', '...', '...']
     }
     """
-    from predict import NUMERIC_COLS   # 순환참조 방지용 lazy import
+    days_raw = features.get('days_to_departure')
+    days = int(days_raw) if days_raw is not None else 999
 
-    model     = bundle['models'][horizon]
-    feat_cols = bundle['feature_cols'][horizon]
-    encoders  = bundle['encoders']
+    if days > 30:
+        shap_map = get_catboost_shap(clf, features)
+        min_shap = 0.01   # log-odds 단위
+    else:
+        shap_map = get_lightgbm_shap(forecaster, features, days)
+        min_shap = 500    # KRW 단위
 
-    # ── Feature 인코딩 (predict.py와 동일 로직) ───────────────────────────
-    row = {col: features.get(col, np.nan) for col in feat_cols
-           if not col.endswith('_enc')}
-    for cat, mapping in encoders.items():
-        enc_col = f'{cat}_enc'
-        if enc_col not in feat_cols:
-            continue
-        raw = str(features.get(cat, '__missing__') or '__missing__')
-        row[enc_col] = float(mapping.get(raw, mapping.get('__missing__', 0)))
+    # WAIT → 가격 하락 예상 → direction='down', BUY → direction='up'
+    direction = 'down' if is_wait else 'up'
 
-    df_row = pd.DataFrame([row])[feat_cols]
-    X      = df_row.astype(float).to_numpy()
+    # direction과 일치하는 부호의 SHAP만 사용해 이유와 결정이 항상 align되게 함.
+    #   CatBoost (D>30): shap>0 = WAIT 쪽 기여
+    #   LightGBM (D≤30): shap>0 = 가격 상승 기여(BUY 이유)
+    if days > 30:
+        want_positive = (direction == 'down')
+    else:
+        want_positive = (direction == 'up')
 
-    # ── SHAP 계산 ─────────────────────────────────────────────────────────
-    shap_map = get_shap_values(model, X, feat_cols)
+    # D≤30(LightGBM)에서 days_to_departure는 가격 예측 기여 설명으로 부적절해 제외
+    exclude = {'days_to_departure'} if days <= 30 else set()
 
-    # ── q50 예측값 ────────────────────────────────────────────────────────
-    q50 = int(round(float(model.predict(X)[0])))
-    cur = current_price or int(features.get('current_cheapest_price', q50))
-    diff = q50 - cur
-    if   diff >  cur * 0.01:  direction = 'up'
-    elif diff < -cur * 0.01:  direction = 'down'
-    else:                     direction = 'flat'
-
-    # ── SHAP 절댓값 기준 정렬 → 상위 feature 문장 생성 ───────────────────
-    ranked = sorted(shap_map.items(), key=lambda x: abs(x[1]), reverse=True)
+    ranked = sorted(
+        [(f, s) for f, s in shap_map.items()
+         if (s > 0) == want_positive and f not in exclude],
+        key=lambda x: abs(x[1]),
+        reverse=True,
+    )
 
     reasons: list[str] = []
     for feat, shap_val in ranked:
         if len(reasons) >= top_n:
             break
-        feat_value = float(df_row[feat].iloc[0]) if feat in df_row.columns else np.nan
-        sentence   = _make_sentence(feat, shap_val, feat_value)
+        feat_value = pd.to_numeric(features.get(feat, np.nan), errors='coerce')
+        sentence   = _make_sentence(feat, shap_val, feat_value, min_shap, use_lgb=(days <= 30))
         if sentence:
             reasons.append(sentence)
 
     return {
-        'horizon_days':     horizon,
-        'q50':              q50,
         'direction':        direction,
-        'direction_amount': diff,
+        'direction_amount': int(round(drop_amount)),
         'reasons':          reasons,
     }
-
-
-def explain_all_horizons(
-    features: dict,
-    bundle: dict,
-    top_n: int = 3,
-) -> list[dict]:
-    """모든 horizon에 대해 explain_forecast 실행."""
-    cur = int(features.get('current_cheapest_price', 0))
-    return [
-        explain_forecast(features, bundle, horizon=h, top_n=top_n, current_price=cur)
-        for h in [1, 3, 7, 14]
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -299,10 +357,11 @@ def explain_all_horizons(
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    import json, joblib
+    from inference import load_model, predict_flight_decision
+    from predict import load_forecaster
 
-    MODEL_PATH = 'data_0526/models/airmoment_model.joblib'
-    bundle     = joblib.load(MODEL_PATH)
+    model      = load_model()
+    forecaster = load_forecaster('airmoment_forecast.joblib')
 
     features = {
         'route_id':                   'ICN-CDG',
@@ -334,14 +393,20 @@ if __name__ == '__main__':
         'arr_fx_change_7d':          -0.3,
     }
 
-    results = explain_all_horizons(features, bundle, top_n=3)
+    decision = predict_flight_decision(features, model, forecaster=forecaster)
+    result = explain_forecast(
+        features,
+        clf=model['clf'],
+        forecaster=forecaster,
+        is_wait=(decision['decision'] == 'WAIT'),
+        drop_amount=decision['predicted_drop_amount'],
+        top_n=3,
+    )
 
-    cur = features['current_cheapest_price']
-    print(f'\n현재가: ₩{cur:,}\n')
-    for r in results:
-        arrow = '↑' if r['direction'] == 'up' else ('↓' if r['direction'] == 'down' else '→')
-        print(f'+{r["horizon_days"]:>2d}일  {arrow}  q50=₩{r["q50"]:,}  '
-              f'(현재가 대비 {r["direction_amount"]:+,}원)')
-        for reason in r['reasons']:
-            print(f'   • {reason}')
-        print()
+    cur   = features['current_cheapest_price']
+    arrow = '↓' if result['direction'] == 'down' else '↑'
+    label = '절감 예상' if result['direction'] == 'down' else '추가 부담 예상'
+    print(f'\n현재가: ₩{cur:,}')
+    print(f'{arrow} {label}: ₩{result["direction_amount"]:,}\n')
+    for reason in result['reasons']:
+        print(f'   • {reason}')
