@@ -327,9 +327,7 @@ def explain_forecast(
     for feat, shap_val in ranked:
         if len(reasons) >= top_n:
             break
-        raw = features.get(feat, np.nan)
-        feat_value = np.nan if raw is None else float(raw)
-        sentence = _make_sentence(feat, shap_val, feat_value, min_shap, use_lgb=(days <= 30))
+        sentence = _make_sentence(feat, shap_val, float(features.get(feat, np.nan)), min_shap, use_lgb=(days <= 30))
         if sentence:
             reasons.append(sentence)
 
