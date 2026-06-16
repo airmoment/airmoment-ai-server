@@ -161,15 +161,36 @@ def predict_flight_decision(
 
     MIN_WAIT_RATIO    = 0.03
     CLF_THRESH_LONG   = 0.50   # D > 30: 학습 범위 내, 기본 threshold
-    CLF_THRESH_SHORT  = 0.60   # D ≤ 30: OOD 구간, 보수적 threshold (더 확실할 때만 WAIT)
-    clf_thresh = CLF_THRESH_SHORT if days <= 30 else CLF_THRESH_LONG
+    CLF_THRESH_SHORT  = 0.60   # 15 ≤ D ≤ 30: OOD 구간, 보수적 threshold
+    CLF_THRESH_NEAR   = 0.70   # D ≤ 14: 단기는 CQR 노이즈 커서 분류기 확신 높을 때만 WAIT
+
+    # 예측값 보정: horizon별 현재가 대비 최대 허용 변화율 (단기일수록 좁게)
+    # horizon_index: 1=+1d, 2=+3d, 3=+7d, 4=+14d
+    MAX_CHANGE_BY_HORIZON = {1: 0.05, 2: 0.08, 3: 0.12, 4: 0.15}
+
+    if days <= 14:
+        clf_thresh = CLF_THRESH_NEAR
+    elif days <= 30:
+        clf_thresh = CLF_THRESH_SHORT
+    else:
+        clf_thresh = CLF_THRESH_LONG
+
+    idx = horizon_index(days)
+    max_change_ratio = MAX_CHANGE_BY_HORIZON[idx]
+
+    # 예측값이 비현실적으로 크면 방향은 유지한 채 현재가 ±max_change_ratio 이내로 보정
+    def _clamp_price(p: float) -> float:
+        lo = current_price * (1.0 - max_change_ratio)
+        hi = current_price * (1.0 + max_change_ratio)
+        return min(max(p, lo), hi)
 
     wait_prob = float(model['clf'].predict_proba(input_df)[:, 1][0])
     clf_wait  = wait_prob >= clf_thresh
 
-    # 회귀 예측 (D > 60 결정 및 fallback용)
+    # 회귀 예측 (D > 60 결정 및 fallback용) — 하락폭도 horizon별 한도로 클램프
     log_ratio = float(model['reg'].predict(input_df)[0])
     reg_drop_amount = max(0.0, current_price * math.expm1(log_ratio))
+    reg_drop_amount = min(reg_drop_amount, current_price * max_change_ratio)
     reg_wait  = (reg_drop_amount / current_price) >= MIN_WAIT_RATIO
 
     # ── conformal 예측 ──────────────────────────────────────────────
@@ -177,10 +198,9 @@ def predict_flight_decision(
     if forecaster is not None:
         try:
             fc  = forecaster.forecast(feature_row)
-            idx = horizon_index(days)
-            q10 = float(fc['q10'][idx])
-            q50 = float(fc['q50'][idx])
-            q90 = float(fc['q90'][idx])
+            q10 = _clamp_price(float(fc['q10'][idx]))
+            q50 = _clamp_price(float(fc['q50'][idx]))
+            q90 = _clamp_price(float(fc['q90'][idx]))
         except Exception:
             forecaster = None
 
