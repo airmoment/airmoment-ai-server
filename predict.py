@@ -65,8 +65,12 @@ class ConformalForecaster:
             row[f'{cat}_enc'] = float(mapping.get(raw, mapping.get('__missing__', 0)))
         return pd.DataFrame([row])[feat_cols].astype(float).to_numpy()
 
+    # horizon별 현재가 대비 최대 허용 변화율 (inference.py와 동일, 단기일수록 좁게)
+    MAX_CHANGE_BY_HORIZON = {1: 0.05, 3: 0.08, 7: 0.12, 14: 0.15}
+
     def forecast(self, features: dict) -> dict:
         result_forecasts = []
+        cur_price = float(features.get('current_cheapest_price', 0))
 
         for h in HORIZONS:
             model = self.models.get(h)
@@ -81,8 +85,14 @@ class ConformalForecaster:
             qhat80 = corr.get('80pct', 0.0)
             qhat50 = corr.get('50pct', 0.0)
 
+            # 예측값이 비현실적으로 크면 방향은 유지한 채 현재가 ±ratio 이내로 보정
+            ratio = self.MAX_CHANGE_BY_HORIZON.get(h, 0.15)
+            lo, hi = cur_price * (1.0 - ratio), cur_price * (1.0 + ratio)
+            def _clamp(v: float) -> int:
+                return int(round(min(max(v, lo), hi)))
+
             vals = sorted([q50 - qhat80, q50 - qhat50, q50, q50 + qhat50, q50 + qhat80])
-            q10, q25, q50_out, q75, q90 = (int(round(v)) for v in vals)
+            q10, q25, q50_out, q75, q90 = (_clamp(v) for v in vals)
 
             result_forecasts.append((h, q10, q25, q50_out, q75, q90))
 
