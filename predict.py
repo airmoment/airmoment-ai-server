@@ -82,17 +82,26 @@ class ConformalForecaster:
             q50 = float(model.predict(X)[0])
 
             corr   = self.conf_corr.get(f'{h}d', {})
-            qhat80 = corr.get('80pct', 0.0)
-            qhat50 = corr.get('50pct', 0.0)
+            qhat80 = abs(corr.get('80pct', 0.0))
+            qhat50 = abs(corr.get('50pct', 0.0))
 
-            # 예측값이 비현실적으로 크면 방향은 유지한 채 현재가 ±ratio 이내로 보정
-            ratio = self.MAX_CHANGE_BY_HORIZON.get(h, 0.15)
-            lo, hi = cur_price * (1.0 - ratio), cur_price * (1.0 + ratio)
-            def _clamp(v: float) -> int:
-                return int(round(min(max(v, lo), hi)))
+            # 1) 중앙값(q50)만 현재가 ±ratio 이내로 보정 (방향 유지)
+            if cur_price > 0:
+                ratio = self.MAX_CHANGE_BY_HORIZON.get(h, 0.15)
+                lo, hi = cur_price * (1.0 - ratio), cur_price * (1.0 + ratio)
+                q50 = min(max(q50, lo), hi)
 
-            vals = sorted([q50 - qhat80, q50 - qhat50, q50, q50 + qhat50, q50 + qhat80])
-            q10, q25, q50_out, q75, q90 = (_clamp(v) for v in vals)
+            # 2) 신뢰구간은 보정된 중앙값 기준으로 qhat만큼 재구성
+            #    (구간 폭 보존 → 붕괴 없음, qhat80≥qhat50≥0 이므로 순서 보장,
+            #     하한은 음수 방지를 위해 0으로 floor)
+            def _px(v: float) -> int:
+                return int(round(max(0.0, v)))
+
+            q10     = _px(q50 - qhat80)
+            q25     = _px(q50 - qhat50)
+            q50_out = _px(q50)
+            q75     = _px(q50 + qhat50)
+            q90     = _px(q50 + qhat80)
 
             result_forecasts.append((h, q10, q25, q50_out, q75, q90))
 

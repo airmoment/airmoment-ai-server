@@ -178,12 +178,6 @@ def predict_flight_decision(
     idx = horizon_index(days)
     max_change_ratio = MAX_CHANGE_BY_HORIZON[idx]
 
-    # 예측값이 비현실적으로 크면 방향은 유지한 채 현재가 ±max_change_ratio 이내로 보정
-    def _clamp_price(p: float) -> float:
-        lo = current_price * (1.0 - max_change_ratio)
-        hi = current_price * (1.0 + max_change_ratio)
-        return min(max(p, lo), hi)
-
     wait_prob = float(model['clf'].predict_proba(input_df)[:, 1][0])
     clf_wait  = wait_prob >= clf_thresh
 
@@ -194,13 +188,15 @@ def predict_flight_decision(
     reg_wait  = (reg_drop_amount / current_price) >= MIN_WAIT_RATIO
 
     # ── conformal 예측 ──────────────────────────────────────────────
+    # forecast()가 이미 horizon별 클램프 + 신뢰구간 재구성을 마친 값을 반환하므로
+    # 그래프(/forecastPrice)와 카드(/predict)가 동일한 값을 사용하게 됨
     q10 = q50 = q90 = None
     if forecaster is not None:
         try:
             fc  = forecaster.forecast(feature_row)
-            q10 = _clamp_price(float(fc['q10'][idx]))
-            q50 = _clamp_price(float(fc['q50'][idx]))
-            q90 = _clamp_price(float(fc['q90'][idx]))
+            q10 = float(fc['q10'][idx])
+            q50 = float(fc['q50'][idx])
+            q90 = float(fc['q90'][idx])
         except Exception:
             forecaster = None
 
