@@ -209,21 +209,21 @@ def predict_flight_decision(
         decision = "WAIT" if (conf_wait and clf_wait) else "BUY"
 
     # ── 절감액 계산 (결정 방향과 일치하도록) ────────────────────────
-    # D>60: CQR은 단기 참고용이므로 predicted_future_min_price는 XGBoost 기반 사용
-    if days > 60 or q50 is None:
-        if decision == "WAIT":
-            predicted_drop_amount      = reg_drop_amount
-            predicted_future_min_price = current_price - reg_drop_amount
-        else:
-            predicted_drop_amount      = 0.0
-            predicted_future_min_price = current_price
-    else:
+    if q50 is not None:
         if decision == "WAIT":
             predicted_drop_amount      = max(0.0, current_price - q10)
             predicted_future_min_price = q10
         else:
             predicted_drop_amount      = max(0.0, q90 - current_price)
             predicted_future_min_price = q50
+    else:
+        # conformal 없을 때 XGBoost fallback
+        if decision == "WAIT":
+            predicted_drop_amount      = reg_drop_amount
+            predicted_future_min_price = current_price - reg_drop_amount
+        else:
+            predicted_drop_amount      = 0.0
+            predicted_future_min_price = current_price
 
     return {
         "decision": decision,

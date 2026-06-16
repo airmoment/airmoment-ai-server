@@ -313,7 +313,7 @@ def explain_forecast(
         min_shap = 0.01   # log-odds 단위
     else:
         shap_map = get_lightgbm_shap(forecaster, features, days)
-        min_shap = 0.005  # log-ratio 단위 (≈0.5% 가격 기여 이상만 표시)
+        min_shap = 500    # KRW 단위
 
     # WAIT → 가격 하락 예상 → direction='down', BUY → direction='up'
     direction = 'down' if is_wait else 'up'

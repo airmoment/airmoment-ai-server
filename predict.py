@@ -81,14 +81,8 @@ class ConformalForecaster:
             qhat80 = corr.get('80pct', 0.0)
             qhat50 = corr.get('50pct', 0.0)
 
-            current_price = float(features.get('current_cheapest_price', 0))
-            def to_krw(log_val: float) -> int:
-                return int(round(np.exp(log_val) * current_price))
-            q10     = to_krw(q50 - qhat80)   # 낮은 가격 하한
-            q25     = to_krw(q50 - qhat50)
-            q50_out = to_krw(q50)
-            q75     = to_krw(q50 + qhat50)
-            q90     = to_krw(q50 + qhat80)   # 높은 가격 상한
+            vals = sorted([q50 - qhat80, q50 - qhat50, q50, q50 + qhat50, q50 + qhat80])
+            q10, q25, q50_out, q75, q90 = (int(round(v)) for v in vals)
 
             result_forecasts.append((h, q10, q25, q50_out, q75, q90))
 
